@@ -1,5 +1,8 @@
 import argparse
+import os
+
 from src.main import translate
+from . import auto_mkdir
 
 parser = argparse.ArgumentParser()
 
@@ -35,15 +38,20 @@ parser.add_argument("--max_steps", type=int, default=150,
 parser.add_argument("--alpha", type=float, default=-1.0,
                     help="""Factor to do length penalty. Negative value means close length penalty.""")
 
-def run(**kwargs):
+parser.add_argument("--multi_gpu", action="store_true", help="Enable multi-gpu.")
 
+
+def run(**kwargs):
     args = parser.parse_args()
 
     # Modify some options.
     for k, v in kwargs.items():
         setattr(args, k, v)
 
+    auto_mkdir(os.path.dirname(args.saveto))
+
     translate(args)
+
 
 if __name__ == '__main__':
     run()

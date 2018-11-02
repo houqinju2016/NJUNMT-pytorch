@@ -1,10 +1,29 @@
+# MIT License
+
+# Copyright (c) 2018 the NJUNMT-pytorch authors.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import collections
-import os
-import random
-import tempfile
+from typing import List
 from typing import Union
 
-from src.utils.logging import INFO
 from .vocabulary import Vocabulary
 
 __all__ = [
@@ -24,13 +43,20 @@ class Record(object):
     __slots__ = ("fields", "index")
 
     def __init__(self, *fields, index):
-
         self.fields = fields
         self.index = index
 
     @property
     def n_fields(self):
         return len(self.fields)
+
+    def __getstate__(self):
+        return {"fields": self.fields, "index": self.index}
+
+    def __setstate__(self, state):
+        self.fields = state['fields']
+        self.index = state['index']
+
 
 def zip_records(*records: Record):
     """
@@ -45,42 +71,6 @@ def zip_records(*records: Record):
         indices.append(r.index)
 
     return Record(*new_fields, index=max(indices))
-
-def shuffle(*path):
-
-    f_handles = [open(p) for p in path]
-
-    # Read all the data
-    lines = []
-    for l in f_handles[0]:
-        line = [l.strip()] + [ff.readline().strip() for ff in f_handles[1:]]
-        lines.append(line)
-
-    # close file handles
-    [f.close() for f in f_handles]
-
-    # random shuffle the data
-    INFO('Shuffling data...')
-    random.shuffle(lines)
-    INFO('Done.')
-
-    # Set up temp files
-    f_handles = []
-    for p in path:
-        _, filename = os.path.split(p)
-        f_handles.append(tempfile.TemporaryFile(prefix=filename + '.shuf', dir="/tmp/", mode="a+"))
-
-    for line in lines:
-        for ii, f in enumerate(f_handles):
-            print(line[ii], file=f)
-
-    # release memory
-    lines = []
-
-    # Reset file handles
-    [f.seek(0) for f in f_handles]
-
-    return tuple(f_handles)
 
 
 class Dataset(object):
@@ -98,18 +88,10 @@ class Dataset(object):
     """
 
     def __init__(self, *args, **kwargs):
-        pass
-
-    @property
-    def data_path(self):
-        raise NotImplementedError
-
-    @property
-    def n_fields(self):
-        raise NotImplementedError
+        self._len = None
 
     def __len__(self):
-        raise NotImplementedError
+        return self._len
 
     def _apply(self, *lines) -> Union[Record, None]:
         """ Do some processing on the raw input of the dataset.
@@ -124,16 +106,13 @@ class Dataset(object):
         """
         raise NotImplementedError
 
-    def _data_iter(self, shuffle):
+    def _data_iter(self):
 
-        if shuffle:
-            return shuffle(self.data_path)
-        else:
-            return open(self.data_path)
+        raise NotImplementedError
 
-    def data_iter(self, shuffle=False):
+    def read(self):
 
-        f_handles = self._data_iter(shuffle=shuffle)
+        f_handles = self._data_iter()
 
         if not isinstance(f_handles, collections.Sequence):
             f_handles = [f_handles]
@@ -147,6 +126,20 @@ class Dataset(object):
 
         [f.close() for f in f_handles]
 
+    def initialize(self):
+
+        _len = sum(1 for _ in self.read())
+
+        self._len = _len
+
+    @property
+    def is_initialize(self):
+        """Initialize phase should at least assign capacity of this dataset."""
+        if self._len is None:
+            return False
+        else:
+            return True
+
 
 class TextLineDataset(Dataset):
     """
@@ -157,25 +150,15 @@ class TextLineDataset(Dataset):
                  data_path,
                  vocabulary,
                  max_len=-1,
-                 shuffle=False
                  ):
-
         super(TextLineDataset, self).__init__()
 
         self._data_path = data_path
-        self._vocab = vocabulary # type: Vocabulary
+        self._vocab = vocabulary  # type: Vocabulary
         self._max_len = max_len
-        self.shuffle = shuffle
 
-        with open(self._data_path) as f:
-            self.num_lines = sum(1 for _ in f)
-
-    @property
-    def data_path(self):
-        return self._data_path
-
-    def __len__(self):
-        return self.num_lines
+    def _data_iter(self):
+        return open(self._data_path)
 
     def _apply(self, line):
         """
@@ -198,26 +181,16 @@ class ZipDataset(Dataset):
     translation.
     """
 
-    def __init__(self, *datasets, shuffle=False):
+    def __init__(self, *datasets):
         """
         """
         super(ZipDataset, self).__init__()
-        self.shuffle = shuffle
-        self.datasets = datasets
 
-    @property
-    def data_path(self):
-        return [ds.data_path for ds in self.datasets]
+        self.datasets = datasets  # type: List[Dataset]
 
-    def __len__(self):
-        return len(self.datasets[0])
+    def _data_iter(self):
 
-    def _data_iter(self, shuffle):
-
-        if shuffle:
-            return shuffle(*self.data_path)
-        else:
-            return [open(dp) for dp in self.data_path]
+        return [d._data_iter() for d in self.datasets]
 
     def _apply(self, *lines: str) -> Union[Record, None]:
         """
@@ -230,3 +203,4 @@ class ZipDataset(Dataset):
             return None
         else:
             return zip_records(*records)
+

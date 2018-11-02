@@ -20,6 +20,7 @@ mechanism.
 - tqdm
 - tensorboardX
 - sacrebleu
+- horovod (for distributed decoding)
 
 # Usage
 
@@ -60,7 +61,7 @@ python -m src.bin.train \
 ```
 See detail options by running ```python -m src.bin.train --help```.
 
-## Translation
+## 4. Translation
 
 When training is over, our code will automatically save the best model. We can translation any text by running:
 ``` bash
@@ -79,6 +80,26 @@ See detail options by running ```python -m src.bin.translate --help```.
 
 Also our code support ensemble decoding. See more options by running ```python -m src.bin.ensemble_translate --help```
 
+
+## 5. Using multiple GPUs
+
+Multi-gpu support is implemented using [Horovod](https://github.com/uber/horovod). Currently we only support decoding in
+a single device with multiple GPUs.
+
+Before installing horovod, we need to install OpenMPI and NCCL. The best practice to install OpenMPI is using conda:
+
+``` bash
+conda install -c conda-forge mpi
+```
+
+NCCL can be downloaded from [official website](https://developer.nvidia.com/nccl). Then set your environment variables correctly.
+
+After these two steps, install horovod follow this [page](https://github.com/uber/horovod/blob/master/docs/gpus.md)
+
+We provide an [example scripts](./scripts/dist_translation.sh) to do distributed decoding. See more details on how to
+configure horovod on this [page](https://github.com/uber/horovod/blob/master/docs/running.md)
+
+
 # Benchmark
 
 See [BENCHMARK.md](./BENCHMARK.md)
@@ -90,7 +111,3 @@ simplified for research use.
 
 # Contact
 If you have any question, please contact [whr94621@foxmail.com](mailto:whr94621@foxmail.com)
-
-
-
-

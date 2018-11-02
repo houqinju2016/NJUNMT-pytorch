@@ -1,8 +1,9 @@
-import sys
 import contextlib
-import os
-import tqdm
 import logging
+import os
+import sys
+
+import tqdm
 
 __all__ = [
     "write_log_to_file",
@@ -32,7 +33,6 @@ class TqdmLoggingHandler(logging.Handler):
 
 
 def _init_global_logger():
-
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
     tqdm_handler = TqdmLoggingHandler()
@@ -41,8 +41,8 @@ def _init_global_logger():
 
     return logger
 
-class GlobalLogger(object):
 
+class GlobalLogger(object):
     _GLOBAL_LOGGER = _init_global_logger()
 
     @staticmethod
@@ -72,22 +72,28 @@ class GlobalLogger(object):
 
         pass
 
+
 _global_logger = GlobalLogger._GLOBAL_LOGGER
 
 write_log_to_file = GlobalLogger.write_log_to_file
 
-def ERROR(string):
-    _global_logger.error(string)
 
-def INFO(string):
-    _global_logger.info(string)
-
-def WARN(string):
-    _global_logger.warning(string)
-
-def PRINT(*string):
-    ss = [s if isinstance(s, str) else '{0}'.format(s) for s in string]
-    sys.stderr.write('{0}\n'.format(' '.join(ss)))
+def ERROR(string, verbose=True):
+    if verbose:
+        _global_logger.error(string)
 
 
+def INFO(string, verbose=True):
+    if verbose:
+        _global_logger.info(string)
 
+
+def WARN(string, verbose=True):
+    if verbose:
+        _global_logger.warning(string)
+
+
+def PRINT(*string, verbose=True):
+    if verbose:
+        ss = [s if isinstance(s, str) else '{0}'.format(s) for s in string]
+        sys.stderr.write('{0}\n'.format(' '.join(ss)))
