@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import collections
+import mmap
 from typing import List
 from typing import Union
 
@@ -30,6 +31,18 @@ __all__ = [
     'TextLineDataset',
     'ZipDataset'
 ]
+
+
+def get_num_of_lines(filename):
+    """Get number of lines of a file."""
+    f = open(filename, "r+")
+    buf = mmap.mmap(f.fileno(), 0)
+    lines = 0
+    readline = buf.readline
+    while readline():
+        lines += 1
+    f.close()
+    return lines
 
 
 class Record(object):
@@ -87,11 +100,17 @@ class Dataset(object):
         should not be output.
     """
 
-    def __init__(self, *args, **kwargs):
-        self._len = None
+    def __init__(self):
+
+        self._size = None
 
     def __len__(self):
-        return self._len
+
+        return self._size
+
+    def set_size(self, size):
+
+        self._size = size
 
     def _apply(self, *lines) -> Union[Record, None]:
         """ Do some processing on the raw input of the dataset.
@@ -117,28 +136,19 @@ class Dataset(object):
         if not isinstance(f_handles, collections.Sequence):
             f_handles = [f_handles]
 
+        count = 0
+
         for lines in zip(*f_handles):
 
             record = self._apply(*lines)
 
             if record is not None:
                 yield record
+                count += 1
 
         [f.close() for f in f_handles]
 
-    def initialize(self):
-
-        _len = sum(1 for _ in self.read())
-
-        self._len = _len
-
-    @property
-    def is_initialize(self):
-        """Initialize phase should at least assign capacity of this dataset."""
-        if self._len is None:
-            return False
-        else:
-            return True
+        self.set_size(count)
 
 
 class TextLineDataset(Dataset):
@@ -156,6 +166,8 @@ class TextLineDataset(Dataset):
         self._data_path = data_path
         self._vocab = vocabulary  # type: Vocabulary
         self._max_len = max_len
+
+        self.set_size(get_num_of_lines(self._data_path))
 
     def _data_iter(self):
         return open(self._data_path)
@@ -188,6 +200,8 @@ class ZipDataset(Dataset):
 
         self.datasets = datasets  # type: List[Dataset]
 
+        self.set_size(len(self.datasets[0]))
+
     def _data_iter(self):
 
         return [d._data_iter() for d in self.datasets]
@@ -203,4 +217,3 @@ class ZipDataset(Dataset):
             return None
         else:
             return zip_records(*records)
-

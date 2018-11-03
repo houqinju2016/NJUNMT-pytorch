@@ -374,8 +374,7 @@ def train(FLAGS):
         TextLineDataset(data_path=data_configs['train_data'][1],
                         vocabulary=vocab_tgt,
                         max_len=data_configs['max_len'][1],
-                        ),
-        shuffle=training_configs['shuffle']
+                        )
     )
 
     valid_bitext_dataset = ZipDataset(

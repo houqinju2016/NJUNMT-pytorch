@@ -119,7 +119,7 @@ def add_noise_to_length(lengths, noise=1.0):
     return noisy_lengths
 
 
-def numbering_records_iter(record_iter: Iterable[Record]):
+def numbering_records_iterator(record_iter: Iterable[Record]):
     """Numbering iterator from dataset.
     """
     for ii in count():
@@ -237,9 +237,6 @@ class DataIterator(object):
             batching_key: Criterion to allocate a batch. Can only be "samples" or "tokens"
         """
 
-        if not dataset.is_initialize:
-            dataset.initialize()
-
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -294,17 +291,17 @@ class DataIterator(object):
         # 1. build data_iterator from dataset
         data_iter = self.dataset.read()
 
-        # 4. numbering (optional)
+        # 2. numbering (optional)
         if self.numbering:
-            data_iter = numbering_records_iter(data_iter)
-
-        # 2. distributed(optional)
-        if self.world_size > 1:
-            data_iter = split_shards_iterator(data_iter, number_shards=self.world_size, n_shard=self.rank)
+            data_iter = numbering_records_iterator(data_iter)
 
         # 3. shuffle (optional)
         if self.shuffle:
             data_iter = shuffle_iterator(data_iter)
+
+        # 4. distributed(optional)
+        if self.world_size > 1:
+            data_iter = split_shards_iterator(data_iter, number_shards=self.world_size, n_shard=self.rank)
 
         # 5. bucketing (optional)
         if self.use_bucket:
