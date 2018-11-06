@@ -7,6 +7,8 @@ import tqdm
 
 __all__ = [
     "write_log_to_file",
+    'set_logging_level',
+    'close_logging',
     "INFO",
     "WARN",
     "ERROR",
@@ -77,23 +79,35 @@ _global_logger = GlobalLogger._GLOBAL_LOGGER
 
 write_log_to_file = GlobalLogger.write_log_to_file
 
+LOGGING_LEVEL = 0
 
-def ERROR(string, verbose=True):
-    if verbose:
+
+def set_logging_level(level):
+    global LOGGING_LEVEL
+    LOGGING_LEVEL = level
+
+
+def close_logging():
+    global LOGGING_LEVEL
+    LOGGING_LEVEL = 60
+
+
+def ERROR(string):
+    if LOGGING_LEVEL <= 40:
         _global_logger.error(string)
 
 
-def INFO(string, verbose=True):
-    if verbose:
+def INFO(string):
+    if LOGGING_LEVEL <= 20:
         _global_logger.info(string)
 
 
-def WARN(string, verbose=True):
-    if verbose:
+def WARN(string):
+    if LOGGING_LEVEL <= 30:
         _global_logger.warning(string)
 
 
-def PRINT(*string, verbose=True):
-    if verbose:
+def PRINT(*string):
+    if LOGGING_LEVEL <= 20:
         ss = [s if isinstance(s, str) else '{0}'.format(s) for s in string]
         sys.stderr.write('{0}\n'.format(' '.join(ss)))
