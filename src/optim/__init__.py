@@ -122,10 +122,6 @@ class Optimizer(object):
         # Assign shortcuts
         self.zero_grad = self.optim.zero_grad
 
-        # Skip useless if evaluation logic if gradient_clip not requested
-        if self.gclip == 0 or self.gclip is None:
-            self.step = self.optim.step
-
     def zero_grad(self):
         self.optim.zero_grad()
 
