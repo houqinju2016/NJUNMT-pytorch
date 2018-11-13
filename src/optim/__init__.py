@@ -8,10 +8,19 @@
 # {'params': model.base.parameters()},
 # {'params': model.classifier.parameters(), 'lr': 1e-3}
 # ], lr=1e-2, momentum=0.9)
+
+import torch.nn as nn
 import torch.optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
-from .adamw import AdamW
+
 from .adafactor import Adafactor
+from .adamw import AdamW
+
+
+def _rescale_grad(parameters, denom):
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    for p in parameters:
+        p.grad.data.div_(denom)
 
 
 class Optimizer(object):
@@ -36,7 +45,7 @@ class Optimizer(object):
 
     def __init__(self,
                  name,
-                 model,
+                 model: nn.Module,
                  lr=0,
                  weight_decay=0,
                  grad_clip=None,
@@ -96,26 +105,20 @@ class Optimizer(object):
         # Assign shortcuts
         self.zero_grad = self.optim.zero_grad
 
-        # Skip useless if evaluation logic if gradient_clip not requested
-        if self.gclip == 0 or self.gclip is None:
-            self.step = self.optim.step
-
     def zero_grad(self):
         self.optim.zero_grad()
 
-    def step(self, closure=None):
+    def step(self, denom=1.0, closure=None):
         """Gradient clipping aware step()."""
+
+        # 1. rescale gradients
+        _rescale_grad(self.params, denom=denom)
+
+        # 2. gradient clips
         if self.gclip is not None and self.gclip > 0:
             clip_grad_norm_(self.params, self.gclip)
-        self.optim.step(closure)
 
-    def rescale_lrate(self, scale, min_lrate=-1.0):
-        if isinstance(scale, list):
-            for scale_, group in zip(scale, self.optim.param_groups):
-                group['lr'] = max(group['lr'] * scale_, min_lrate)
-        else:
-            for group in self.optim.param_groups:
-                group['lr'] = max(group['lr'] * scale, min_lrate)
+        self.optim.step(closure)
 
     def get_lrate(self):
 
