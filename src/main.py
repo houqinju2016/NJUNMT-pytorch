@@ -7,7 +7,6 @@ import torch
 import yaml
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
-from copy import deepcopy
 
 from src.data.data_iterator import DataIterator
 from src.data.dataset import TextLineDataset, ZipDataset
@@ -19,9 +18,9 @@ from src.modules.criterions import NMTCriterion
 from src.optim import Optimizer
 from src.optim.lr_scheduler import ReduceOnPlateauScheduler, NoamScheduler
 from src.utils.common_utils import *
+from src.utils.configs import default_configs, pretty_configs
 from src.utils.logging import *
 from src.utils.moving_average import MovingAverage
-from src.utils.configs import default_configs, pretty_configs
 
 BOS = Vocabulary.BOS
 EOS = Vocabulary.EOS
@@ -349,8 +348,6 @@ def train(FLAGS):
 
     set_seed(GlobalNames.SEED)
 
-    best_model_prefix = os.path.join(FLAGS.saveto, FLAGS.model_name + GlobalNames.MY_BEST_MODEL_SUFFIX)
-
     timer = Timer()
 
     # ================================================================================== #
@@ -363,8 +360,7 @@ def train(FLAGS):
     vocab_src = Vocabulary(**data_configs["vocabularies"][0])
     vocab_tgt = Vocabulary(**data_configs["vocabularies"][1])
 
-    train_batch_size = training_configs["batch_size"] * max(1, training_configs["update_cycle"])
-    train_buffer_size = training_configs["buffer_size"] * max(1, training_configs["update_cycle"])
+    actual_buffer_size = training_configs["buffer_size"] * max(1, training_configs["update_cycle"])
 
     train_bitext_dataset = ZipDataset(
         TextLineDataset(data_path=data_configs['train_data'][0],
@@ -374,8 +370,7 @@ def train(FLAGS):
         TextLineDataset(data_path=data_configs['train_data'][1],
                         vocabulary=vocab_tgt,
                         max_len=data_configs['max_len'][1],
-                        ),
-        shuffle=training_configs['shuffle']
+                        )
     )
 
     valid_bitext_dataset = ZipDataset(
@@ -388,9 +383,9 @@ def train(FLAGS):
     )
 
     training_iterator = DataIterator(dataset=train_bitext_dataset,
-                                     batch_size=train_batch_size,
+                                     batch_size=training_configs["batch_size"],
                                      use_bucket=training_configs['use_bucket'],
-                                     buffer_size=train_buffer_size,
+                                     buffer_size=actual_buffer_size,
                                      batching_func=training_configs['batching_key'])
 
     valid_iterator = DataIterator(dataset=valid_bitext_dataset,
@@ -421,9 +416,11 @@ def train(FLAGS):
 
     # 0. Initial
     model_collections = Collections()
+
     checkpoint_saver = Saver(save_prefix="{0}.ckpt".format(os.path.join(FLAGS.saveto, FLAGS.model_name)),
                              num_max_keeping=training_configs['num_kept_checkpoints']
                              )
+    best_model_prefix = os.path.join(FLAGS.saveto, FLAGS.model_name + GlobalNames.MY_BEST_MODEL_SUFFIX)
     best_model_saver = Saver(save_prefix=best_model_prefix, num_max_keeping=training_configs['num_kept_best_model'])
 
     # 1. Build Model & Criterion
@@ -494,13 +491,13 @@ def train(FLAGS):
     uidx = model_collections.get_collection("uidx", [0])[-1]
     bad_count = model_collections.get_collection("bad_count", [0])[-1]
     oom_count = model_collections.get_collection("oom_count", [0])[-1]
+    cum_n_samples = 0
+    cum_n_words = 0
+    best_valid_loss = 1.0 * 1e10  # Max Float
+    update_cycle = training_configs['update_cycle']
+    grad_denom = 0
 
     summary_writer = SummaryWriter(log_dir=FLAGS.log_path)
-
-    cum_samples = 0
-    cum_words = 0
-    best_valid_loss = 1.0 * 1e10  # Max Float
-    saving_files = []
 
     # Timer for computing speed
     timer_for_speed = Timer()
@@ -531,47 +528,60 @@ def train(FLAGS):
 
             seqs_x, seqs_y = batch
 
-            n_samples_t = len(seqs_x)
-            n_words_t = sum(len(s) for s in seqs_y)
+            batch_size = len(seqs_x)
 
-            cum_samples += n_samples_t
-            cum_words += n_words_t
-
-            training_progress_bar.update(n_samples_t)
-
-            optim.zero_grad()
+            cum_n_samples += batch_size
+            cum_n_words += sum(len(s) for s in seqs_y)
 
             try:
                 # Prepare data
-                for seqs_x_t, seqs_y_t in split_shard(seqs_x, seqs_y, split_size=training_configs['update_cycle']):
-                    x, y = prepare_data(seqs_x_t, seqs_y_t, cuda=GlobalNames.USE_GPU)
+                x, y = prepare_data(seqs_x, seqs_y, cuda=GlobalNames.USE_GPU)
 
-                    loss = compute_forward(model=nmt_model,
-                                           critic=critic,
-                                           seqs_x=x,
-                                           seqs_y=y,
-                                           eval=False,
-                                           normalization=n_samples_t,
-                                           norm_by_words=training_configs["norm_by_words"])
-                optim.step()
+                loss = compute_forward(model=nmt_model,
+                                       critic=critic,
+                                       seqs_x=x,
+                                       seqs_y=y,
+                                       eval=False,
+                                       normalization=1.0,
+                                       norm_by_words=training_configs["norm_by_words"])
+
+                update_cycle -= 1
+                grad_denom += batch_size
 
             except RuntimeError as e:
                 if 'out of memory' in str(e):
                     print('| WARNING: ran out of memory, skipping batch')
                     oom_count += 1
-                    optim.zero_grad()
                 else:
                     raise e
 
-            if ma is not None and eidx >= training_configs['moving_average_start_epoch']:
-                ma.step()
+            # When update_cycle becomes 0, it means end of one batch. Several things will be done:
+            # - update parameters
+            # - reset update_cycle and grad_denom
+            # - update uidx
+            # - update moving average
+            if update_cycle == 0:
+                optim.step(denom=grad_denom)
+                optim.zero_grad()
+
+                if training_progress_bar is not None:
+                    training_progress_bar.update(grad_denom)
+
+                update_cycle = training_configs['update_cycle']
+                grad_denom = 0
+                uidx += 1
+
+                if ma is not None and eidx >= training_configs['moving_average_start_epoch']:
+                    ma.step()
+            else:
+                continue
 
             # ================================================================================== #
             # Display some information
             if should_trigger_by_steps(uidx, eidx, every_n_step=training_configs['disp_freq']):
                 # words per second and sents per second
-                words_per_sec = cum_words / (timer.toc(return_seconds=True))
-                sents_per_sec = cum_samples / (timer.toc(return_seconds=True))
+                words_per_sec = cum_n_words / (timer.toc(return_seconds=True))
+                sents_per_sec = cum_n_samples / (timer.toc(return_seconds=True))
                 lrate = list(optim.get_lrate())[0]
 
                 summary_writer.add_scalar("Speed(words/sec)", scalar_value=words_per_sec, global_step=uidx)
@@ -581,8 +591,8 @@ def train(FLAGS):
 
                 # Reset timer
                 timer.tic()
-                cum_words = 0
-                cum_samples = 0
+                cum_n_words = 0
+                cum_n_samples = 0
 
             # ================================================================================== #
             # Saving checkpoints
@@ -599,15 +609,15 @@ def train(FLAGS):
             # Loss Validation & Learning rate annealing
             if should_trigger_by_steps(global_step=uidx, n_epoch=eidx, every_n_step=training_configs['loss_valid_freq'],
                                        debug=FLAGS.debug):
+                with cache_parameters(nmt_model):
 
-                if ma is not None:
-                    origin_state_dict = deepcopy(nmt_model.state_dict())
-                    nmt_model.load_state_dict(ma.export_ma_params(), strict=False)
+                    if ma is not None:
+                        nmt_model.load_state_dict(ma.export_ma_params(), strict=False)
 
-                valid_loss = loss_validation(model=nmt_model,
-                                             critic=critic,
-                                             valid_iterator=valid_iterator,
-                                             )
+                    valid_loss = loss_validation(model=nmt_model,
+                                                 critic=critic,
+                                                 valid_iterator=valid_iterator
+                                                 )
 
                 model_collections.add_to_collection("history_losses", valid_loss)
 
@@ -618,10 +628,6 @@ def train(FLAGS):
 
                 best_valid_loss = min_history_loss
 
-                if ma is not None:
-                    nmt_model.load_state_dict(origin_state_dict)
-                    del origin_state_dict
-
             # ================================================================================== #
             # BLEU Validation & Early Stop
 
@@ -630,21 +636,22 @@ def train(FLAGS):
                                        min_step=training_configs['bleu_valid_warmup'],
                                        debug=FLAGS.debug):
 
-                if ma is not None:
-                    origin_state_dict = deepcopy(nmt_model.state_dict())
-                    nmt_model.load_state_dict(ma.export_ma_params(), strict=False)
+                with cache_parameters(nmt_model):
 
-                valid_bleu = bleu_validation(uidx=uidx,
-                                             valid_iterator=valid_iterator,
-                                             batch_size=training_configs["bleu_valid_batch_size"],
-                                             model=nmt_model,
-                                             bleu_scorer=bleu_scorer,
-                                             vocab_tgt=vocab_tgt,
-                                             valid_dir=FLAGS.valid_path,
-                                             max_steps=training_configs["bleu_valid_configs"]["max_steps"],
-                                             beam_size=training_configs["bleu_valid_configs"]["beam_size"],
-                                             alpha=training_configs["bleu_valid_configs"]["alpha"]
-                                             )
+                    if ma is not None:
+                        nmt_model.load_state_dict(ma.export_ma_params(), strict=False)
+
+                    valid_bleu = bleu_validation(uidx=uidx,
+                                                 valid_iterator=valid_iterator,
+                                                 batch_size=training_configs["bleu_valid_batch_size"],
+                                                 model=nmt_model,
+                                                 bleu_scorer=bleu_scorer,
+                                                 vocab_tgt=vocab_tgt,
+                                                 valid_dir=FLAGS.valid_path,
+                                                 max_steps=training_configs["bleu_valid_configs"]["max_steps"],
+                                                 beam_size=training_configs["bleu_valid_configs"]["beam_size"],
+                                                 alpha=training_configs["bleu_valid_configs"]["alpha"]
+                                                 )
 
                 model_collections.add_to_collection(key="history_bleus", value=valid_bleu)
 
@@ -672,10 +679,6 @@ def train(FLAGS):
                         WARN("Early Stop!")
 
                 summary_writer.add_scalar("bad_count", bad_count, uidx)
-
-                if ma is not None:
-                    nmt_model.load_state_dict(origin_state_dict)
-                    del origin_state_dict
 
                 INFO("{0} Loss: {1:.2f} BLEU: {2:.2f} lrate: {3:6f} patience: {4}".format(
                     uidx, valid_loss, valid_bleu, lrate, bad_count
