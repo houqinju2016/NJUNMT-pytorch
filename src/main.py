@@ -1,3 +1,4 @@
+import itertools
 import os
 import random
 import time
@@ -8,6 +9,7 @@ import yaml
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
+import src.distributed as dist
 from src.data.data_iterator import DataIterator
 from src.data.dataset import TextLineDataset, ZipDataset
 from src.data.vocabulary import Vocabulary
@@ -694,6 +696,20 @@ def train(FLAGS):
 def translate(FLAGS):
     GlobalNames.USE_GPU = FLAGS.use_gpu
 
+    if FLAGS.multi_gpu:
+        assert FLAGS.use_gpu
+
+        dist.init()
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        torch.cuda.set_device(FLAGS.local_rank)
+    else:
+        world_size = 1
+        rank = 0
+
+    if rank != 0:
+        close_logging()
+
     config_path = os.path.abspath(FLAGS.config_path)
 
     with open(config_path.strip()) as f:
@@ -718,7 +734,12 @@ def translate(FLAGS):
 
     valid_iterator = DataIterator(dataset=valid_dataset,
                                   batch_size=FLAGS.batch_size,
-                                  use_bucket=True, buffer_size=100000, numbering=True)
+                                  use_bucket=True,
+                                  buffer_size=100000,
+                                  numbering=True,
+                                  world_size=world_size,
+                                  rank=rank
+                                  )
 
     INFO('Done. Elapsed time {0}'.format(timer.toc()))
 
@@ -751,11 +772,15 @@ def translate(FLAGS):
 
     timer.tic()
 
-    infer_progress_bar = tqdm(total=len(valid_iterator),
-                              desc=' - (Infer)  ',
-                              unit="sents")
+    if rank == 0:
+        infer_progress_bar = tqdm(total=len(valid_iterator),
+                                  desc=' - (Infer)  ',
+                                  unit="sents")
+    else:
+        infer_progress_bar = None
 
     valid_iter = valid_iterator.build_generator()
+
     for batch in valid_iter:
 
         numbers, seqs_x = batch
@@ -779,42 +804,82 @@ def translate(FLAGS):
 
         result_numbers += numbers
 
-        infer_progress_bar.update(batch_size_t)
+        if rank == 0:
+            infer_progress_bar.update(batch_size_t * world_size)
 
-    infer_progress_bar.close()
+    if rank == 0:
+        infer_progress_bar.close()
+
+    if FLAGS.multi_gpu:
+        n_words = sum(dist.all_gather_object(n_words))
 
     INFO('Done. Speed: {0:.2f} words/sec'.format(n_words / (timer.toc(return_seconds=True))))
 
-    translation = []
-    for sent in result:
-        samples = []
-        for trans in sent:
-            sample = []
-            for w in trans:
-                if w == vocab_tgt.EOS:
-                    break
-                sample.append(vocab_tgt.id2token(w))
-            samples.append(vocab_tgt.tokenizer.detokenize(sample))
-        translation.append(samples)
+    if FLAGS.multi_gpu:
 
-    # resume the ordering
-    origin_order = np.argsort(result_numbers).tolist()
-    translation = [translation[ii] for ii in origin_order]
+        result_gathered = dist.all_gather_object_with_shared_fs(result)
 
-    keep_n = FLAGS.beam_size if FLAGS.keep_n <= 0 else min(FLAGS.beam_size, FLAGS.keep_n)
-    outputs = ['%s.%d' % (FLAGS.saveto, i) for i in range(keep_n)]
+        result = []
 
-    with batch_open(outputs, 'w') as handles:
-        for trans in translation:
-            for i in range(keep_n):
-                if i < len(trans):
-                    handles[i].write('%s\n' % trans[i])
-                else:
-                    handles[i].write('%s\n' % 'eos')
+        for lines in itertools.zip_longest(*result_gathered, fillvalue=None):
+            for line in lines:
+                if line is not None:
+                    result.append(line)
+
+        result_numbers_gathered = dist.all_gather_object_with_shared_fs(result_numbers)
+
+        result_numbers = []
+
+        for numbers in itertools.zip_longest(*result_numbers_gathered, fillvalue=None):
+            for num in numbers:
+                if num is not None:
+                    result_numbers.append(num)
+
+    if rank == 0:
+        translation = []
+        for sent in result:
+            samples = []
+            for trans in sent:
+                sample = []
+                for w in trans:
+                    if w == vocab_tgt.EOS:
+                        break
+                    sample.append(vocab_tgt.id2token(w))
+                samples.append(vocab_tgt.tokenizer.detokenize(sample))
+            translation.append(samples)
+
+        # resume the ordering
+        origin_order = np.argsort(result_numbers).tolist()
+        translation = [translation[ii] for ii in origin_order]
+
+        keep_n = FLAGS.beam_size if FLAGS.keep_n <= 0 else min(FLAGS.beam_size, FLAGS.keep_n)
+        outputs = ['%s.%d' % (FLAGS.saveto, i) for i in range(keep_n)]
+
+        with batch_open(outputs, 'w') as handles:
+            for trans in translation:
+                for i in range(keep_n):
+                    if i < len(trans):
+                        handles[i].write('%s\n' % trans[i])
+                    else:
+                        handles[i].write('%s\n' % 'eos')
 
 
 def ensemble_translate(FLAGS):
     GlobalNames.USE_GPU = FLAGS.use_gpu
+
+    if FLAGS.multi_gpu:
+        assert FLAGS.use_gpu
+
+        dist.init()
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        torch.cuda.set_device(FLAGS.local_rank)
+    else:
+        world_size = 1
+        rank = 0
+
+    if rank != 0:
+        close_logging()
 
     config_path = os.path.abspath(FLAGS.config_path)
 
@@ -840,7 +905,12 @@ def ensemble_translate(FLAGS):
 
     valid_iterator = DataIterator(dataset=valid_dataset,
                                   batch_size=FLAGS.batch_size,
-                                  use_bucket=True, buffer_size=100000, numbering=True)
+                                  use_bucket=True,
+                                  buffer_size=100000,
+                                  numbering=True,
+                                  world_size=world_size,
+                                  rank=rank
+                                  )
 
     INFO('Done. Elapsed time {0}'.format(timer.toc()))
 
@@ -881,11 +951,15 @@ def ensemble_translate(FLAGS):
 
     timer.tic()
 
-    infer_progress_bar = tqdm(total=len(valid_iterator),
-                              desc=' - (Infer)  ',
-                              unit="sents")
+    if rank == 0:
+        infer_progress_bar = tqdm(total=len(valid_iterator),
+                                  desc=' - (Infer)  ',
+                                  unit="sents")
+    else:
+        infer_progress_bar = None
 
     valid_iter = valid_iterator.build_generator()
+
     for batch in valid_iter:
 
         numbers, seqs_x = batch
@@ -907,35 +981,63 @@ def ensemble_translate(FLAGS):
 
             n_words += len(sent_t[0])
 
-        infer_progress_bar.update(batch_size_t)
+        result_numbers += numbers
 
-    infer_progress_bar.close()
+        if rank == 0:
+            infer_progress_bar.update(batch_size_t * world_size)
+
+    if rank == 0:
+        infer_progress_bar.close()
+
+    if FLAGS.multi_gpu:
+        n_words = sum(dist.all_gather_object(n_words))
 
     INFO('Done. Speed: {0:.2f} words/sec'.format(n_words / (timer.toc(return_seconds=True))))
 
-    translation = []
-    for sent in result:
-        samples = []
-        for trans in sent:
-            sample = []
-            for w in trans:
-                if w == vocab_tgt.EOS:
-                    break
-                sample.append(vocab_tgt.id2token(w))
-            samples.append(vocab_tgt.tokenizer.detokenize(sample))
-        translation.append(samples)
+    if FLAGS.multi_gpu:
 
-    # resume the ordering
-    origin_order = np.argsort(result_numbers).tolist()
-    translation = [translation[ii] for ii in origin_order]
+        result_gathered = dist.all_gather_object_with_shared_fs(result)
 
-    keep_n = FLAGS.beam_size if FLAGS.keep_n <= 0 else min(FLAGS.beam_size, FLAGS.keep_n)
-    outputs = ['%s.%d' % (FLAGS.saveto, i) for i in range(keep_n)]
+        result = []
 
-    with batch_open(outputs, 'w') as handles:
-        for trans in translation:
-            for i in range(keep_n):
-                if i < len(trans):
-                    handles[i].write('%s\n' % trans[i])
-                else:
-                    handles[i].write('%s\n' % 'eos')
+        for lines in itertools.zip_longest(*result_gathered, fillvalue=None):
+            for line in lines:
+                if line is not None:
+                    result.append(line)
+
+        result_numbers_gathered = dist.all_gather_object_with_shared_fs(result_numbers)
+
+        result_numbers = []
+
+        for numbers in itertools.zip_longest(*result_numbers_gathered, fillvalue=None):
+            for num in numbers:
+                if num is not None:
+                    result_numbers.append(num)
+
+    if rank == 0:
+        translation = []
+        for sent in result:
+            samples = []
+            for trans in sent:
+                sample = []
+                for w in trans:
+                    if w == vocab_tgt.EOS:
+                        break
+                    sample.append(vocab_tgt.id2token(w))
+                samples.append(vocab_tgt.tokenizer.detokenize(sample))
+            translation.append(samples)
+
+        # resume the ordering
+        origin_order = np.argsort(result_numbers).tolist()
+        translation = [translation[ii] for ii in origin_order]
+
+        keep_n = FLAGS.beam_size if FLAGS.keep_n <= 0 else min(FLAGS.beam_size, FLAGS.keep_n)
+        outputs = ['%s.%d' % (FLAGS.saveto, i) for i in range(keep_n)]
+
+        with batch_open(outputs, 'w') as handles:
+            for trans in translation:
+                for i in range(keep_n):
+                    if i < len(trans):
+                        handles[i].write('%s\n' % trans[i])
+                    else:
+                        handles[i].write('%s\n' % 'eos')

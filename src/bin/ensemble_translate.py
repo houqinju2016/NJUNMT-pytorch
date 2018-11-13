@@ -58,6 +58,10 @@ parser.add_argument("--max_steps", type=int, default=150,
 parser.add_argument("--alpha", type=float, default=-1.0,
                     help="""Factor to do length penalty. Negative value means close length penalty.""")
 
+parser.add_argument("--local_rank", type=int, default=0, help="Local rank number. "
+                                                              "This is automatically allocated by src.distributed.launch.")
+
+parser.add_argument("--multi_gpu", action="store_true", help="Whether to use multi-gpu.")
 
 def run(**kwargs):
     args = parser.parse_args()
